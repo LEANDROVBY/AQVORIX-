@@ -1,10 +1,10 @@
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
-import fs from "fs";
 import crypto from "crypto";
 import path from "path";
 import { fileURLToPath } from "url";
+import { supabase, getUser as getSupabaseUser, getMessages as getSupabaseMessages, saveMessages, deleteMessages, getInitiative as getSupabaseInitiative, saveInitiative as saveSupabaseInitiative, getLatestUserMessage } from "./supabase-db.js";
 
 dotenv.config();
 
@@ -16,38 +16,6 @@ const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || "0.0.0.0";
 const PUBLIC_URL = process.env.PUBLIC_URL || `http://localhost:${PORT}`;
 const PRO_PRICE = Number(process.env.PRO_PRICE || 5000);
-
-const DATA_DIR = path.join(__dirname, "data");
-const DB_FILE = path.join(DATA_DIR, "vybe-data.json");
-
-fs.mkdirSync(DATA_DIR, { recursive: true });
-
-const defaultDb = {
-  messages: [],
-  initiative: {},
-  users: {}
-};
-
-function loadDb() {
-  try {
-    if (!fs.existsSync(DB_FILE)) {
-      fs.writeFileSync(DB_FILE, JSON.stringify(defaultDb, null, 2));
-      return structuredClone(defaultDb);
-    }
-    return JSON.parse(fs.readFileSync(DB_FILE, "utf8"));
-  } catch (error) {
-    console.error("DB read error:", error);
-    return structuredClone(defaultDb);
-  }
-}
-
-let db = loadDb();
-
-function saveDb() {
-  const tmp = `${DB_FILE}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(db, null, 2));
-  fs.renameSync(tmp, DB_FILE);
-}
 
 function clean(value, fallback = "") {
   return String(value ?? fallback).trim().slice(0, 4000);
@@ -248,41 +216,57 @@ function dayKey() {
   return d.toISOString().slice(0, 10);
 }
 
-function getUser(userId) {
-  if (!db.users[userId]) db.users[userId] = { pro: false, proUntil: null };
-  return db.users[userId];
+async function getUser(userId) {
+  const u = await getSupabaseUser(userId);
+  return {
+    pro: Boolean(u.pro),
+    proUntil: u.pro_until ?? null
+  };
 }
 
-function isPro(userId) {
-  const u = getUser(userId);
+async function isPro(userId) {
+  const u = await getUser(userId);
   return Boolean(u.pro || (u.proUntil && Date.parse(u.proUntil) > Date.now()));
 }
 
-function getUsage(userId) {
-  const userMessages = db.messages.filter(x => x.userId === userId && x.role === "user" && String(x.createdAt).slice(0, 10) === dayKey());
-  const pro = isPro(userId);
-  return { used: userMessages.length, limit: pro ? null : Number(process.env.FREE_DAILY_LIMIT || 20), pro, date: dayKey() };
+async function getUsage(userId) {
+  const start = new Date();
+  start.setUTCHours(0, 0, 0, 0);
+  const end = new Date(start);
+  end.setUTCDate(end.getUTCDate() + 1);
+
+  const { count, error } = await supabase
+    .from("messages")
+    .select("id", { count: "exact", head: true })
+    .eq("user_id", userId)
+    .eq("role", "user")
+    .gte("created_at", start.toISOString())
+    .lt("created_at", end.toISOString());
+
+  if (error) throw error;
+
+  const pro = await isPro(userId);
+  return {
+    used: count || 0,
+    limit: pro ? null : Number(process.env.FREE_DAILY_LIMIT || 20),
+    pro,
+    date: dayKey()
+  };
 }
 
 function initiativeMessage(type = "casual") {
   const options = {
     casual: ["Hace un rato que no hablamos. ¿Cómo viene tu día?", "Se me ocurrió pasar por acá. ¿Qué estás haciendo?", "¿Qué tenés en la cabeza hoy?"],
     motivation: ["¿Querés que avancemos un poquito con eso que tenías pendiente?", "Una pequeña acción también cuenta. ¿Qué podrías hacer ahora?"],
-    night: ["¿Cómo cerramos el día? ¿Charlamos un rato?", "Antes de terminar el día: ¿cómo estás?" ]
   };
   const list = options[type] || options.casual;
   return list[Math.floor(Math.random() * list.length)];
 }
 
-function getMessages(userId, limit = 100) {
-  return db.messages
-    .filter(x => x.userId === userId)
-    .slice(-limit);
+async function buildConversationContext(userId, limit = 12) {
+  const messages = await getSupabaseMessages(userId, limit);
+  return messages.map(x => `${x.role}: ${x.content || x.message}`).join("\n");
 }
-function buildConversationContext(userId, limit = 12) {
-  return getMessages(userId, limit).map(x => `${x.role}: ${x.content || x.message}`).join("\n");
-}
-
 const allowedOrigins = String(process.env.ALLOWED_ORIGINS || "").split(",").map(x => x.trim()).filter(Boolean);
 app.use(cors({ origin: (origin, callback) => { if (!origin || allowedOrigins.length === 0 || allowedOrigins.includes(origin)) return callback(null, true); return callback(new Error("Origen no permitido")); } }));
 app.use(express.json({ limit: "1mb" }));
@@ -306,18 +290,18 @@ app.get("/api/config", (_req, res) => {
   });
 });
 
-app.get("/api/usage", (req, res) => {
+app.get("/api/usage", async (req, res) => {
   const userId = clean(req.query?.userId, "anonymous").slice(0, 120);
-  return res.json({ ok: true, ...getUsage(userId) });
+  return res.json({ ok: true, ...(await getUsage(userId)) });
 });
 
-app.get("/api/me", (req, res) => {
+app.get("/api/me", async (req, res) => {
   const userId = clean(req.query?.userId, "anonymous").slice(0, 120);
-  const user = getUser(userId);
-  return res.json({ ok: true, userId, pro: isPro(userId), proUntil: user.proUntil || null });
+  const user = await getUser(userId);
+  return res.json({ ok: true, userId, pro: await isPro(userId), proUntil: user.proUntil || null });
 });
 
-app.post("/api/chat", (req, res) => {
+app.post("/api/chat", async (req, res) => {
   try {
     const userId = clean(req.body?.userId, "anonymous").slice(0, 120);
     const message = clean(req.body?.message);
@@ -326,7 +310,7 @@ app.post("/api/chat", (req, res) => {
       return res.status(400).json({ error: "Falta message." });
     }
 
-    const usage = getUsage(userId);
+    const usage = await getUsage(userId);
     if (!usage.pro && usage.used >= usage.limit) {
       return res.status(429).json({ error: "Límite diario alcanzado.", upgradeRequired: true, usage });
     }
@@ -341,7 +325,7 @@ app.post("/api/chat", (req, res) => {
       createdAt: now
     };
 
-    const context = buildConversationContext(userId, 12); const reply = assistantReply(message, context);
+    const context = await buildConversationContext(userId, 12); const reply = assistantReply(message, context);
 
     const assistantMessage = {
       id: crypto.randomUUID(),
@@ -352,8 +336,7 @@ app.post("/api/chat", (req, res) => {
       createdAt: new Date().toISOString()
     };
 
-    db.messages.push(userMessage, assistantMessage);
-    saveDb();
+    await saveMessages([userMessage, assistantMessage]);
 
     return res.json({
       ok: true,
@@ -361,7 +344,7 @@ app.post("/api/chat", (req, res) => {
       message: reply,
       assistant: assistantMessage,
       userMessage,
-      usage: getUsage(userId)
+      usage: await getUsage(userId)
     });
   } catch (error) {
     console.error("POST /api/chat:", error);
@@ -369,81 +352,90 @@ app.post("/api/chat", (req, res) => {
   }
 });
 
-app.get("/api/history", (req, res) => {
-  const userId = clean(req.query?.userId, "anonymous").slice(0, 120);
-  const messages = getMessages(userId);
-  return res.json({ ok: true, messages, history: messages });
-});
-
-app.delete("/api/history", (req, res) => {
-  const userId = clean(req.query?.userId, "anonymous").slice(0, 120);
-  db.messages = db.messages.filter(x => x.userId !== userId);
-  saveDb();
-  return res.json({ ok: true });
-});
-
-app.get("/api/initiative", (req, res) => {
-  const userId = clean(req.query?.userId, "anonymous").slice(0, 120);
-  const settings = db.initiative[userId] || { enabled: true, hours: 12, type: "casual", lastMessageAt: null };
-  const lastUserMessage = [...db.messages].reverse().find(x => x.userId === userId && x.role === "user");
-  const elapsedHours = lastUserMessage ? (Date.now() - Date.parse(lastUserMessage.createdAt)) / 3600000 : Infinity;
-  const shouldSpeak = Boolean(settings.enabled && elapsedHours >= Number(settings.hours || 12) && isPro(userId));
-  const message = shouldSpeak ? initiativeMessage(settings.type) : null;
-  if (shouldSpeak) {
-    settings.lastMessageAt = new Date().toISOString();
-    db.initiative[userId] = settings;
-    saveDb();
+app.get("/api/history", async (req, res) => {
+  try {
+    const userId = clean(req.query?.userId, "anonymous").slice(0, 120);
+    const messages = await getSupabaseMessages(userId);
+    return res.json({ ok: true, messages, history: messages });
+  } catch (error) {
+    console.error("GET /api/history:", error);
+    return res.status(500).json({ error: "No se pudo cargar el historial." });
   }
-  return res.json({ ok: true, settings, shouldSpeak, shouldInitiate: shouldSpeak, message });
 });
 
-app.post("/api/initiative", (req, res) => {
-  const userId = clean(req.body?.userId, "anonymous").slice(0, 120);
-  const current = db.initiative[userId] || {
-    enabled: true,
-    hours: 12,
-    type: "casual",
-    lastMessageAt: null
-  };
-
-  const next = {
-    ...current,
-    enabled: typeof req.body?.enabled === "boolean" ? req.body.enabled : current.enabled,
-    hours: Number(req.body?.hours || current.hours),
-    type: clean(req.body?.type, current.type).slice(0, 50)
-  };
-
-  db.initiative[userId] = next;
-  saveDb();
-
-  return res.json({ ok: true, settings: next });
+app.delete("/api/history", async (req, res) => {
+  try {
+    const userId = clean(req.query?.userId, "anonymous").slice(0, 120);
+    await deleteMessages(userId);
+    return res.json({ ok: true });
+  } catch (error) {
+    console.error("DELETE /api/history:", error);
+    return res.status(500).json({ error: "No se pudo borrar el historial." });
+  }
 });
 
-app.post("/api/initiative/check", (req, res) => {
-  const userId = clean(req.body?.userId, "anonymous").slice(0, 120);
-  const settings = db.initiative[userId] || {
-    enabled: true,
-    hours: 12,
-    type: "casual",
-    lastMessageAt: null
-  };
+app.get("/api/initiative", async (req, res) => {
+  try {
+    const userId = clean(req.query?.userId, "anonymous").slice(0, 120);
+    const settings = await getSupabaseInitiative(userId);
+    const lastUserMessage = await getLatestUserMessage(userId);
+    const elapsedHours = lastUserMessage ? (Date.now() - Date.parse(lastUserMessage.createdAt)) / 3600000 : Infinity;
+    const shouldSpeak = Boolean(settings.enabled && elapsedHours >= Number(settings.hours || 12) && await isPro(userId));
+    const message = shouldSpeak ? initiativeMessage(settings.type) : null;
+    if (shouldSpeak) {
+      settings.lastMessageAt = new Date().toISOString();
+      await saveSupabaseInitiative(userId, settings);
+    }
+    return res.json({ ok: true, settings, shouldSpeak, shouldInitiate: shouldSpeak, message });
+  } catch (error) {
+    console.error("GET /api/initiative:", error);
+    return res.status(500).json({ error: "No se pudo consultar la iniciativa." });
+  }
+});
 
-  const lastUserMessage = [...db.messages]
-    .reverse()
-    .find(x => x.userId === userId && x.role === "user");
+app.post("/api/initiative", async (req, res) => {
+  try {
+    const userId = clean(req.body?.userId, "anonymous").slice(0, 120);
+    const current = await getSupabaseInitiative(userId);
 
-  const elapsedHours = lastUserMessage
-    ? (Date.now() - Date.parse(lastUserMessage.createdAt)) / 3600000
-    : Infinity;
+    const next = {
+      ...current,
+      enabled: typeof req.body?.enabled === "boolean" ? req.body.enabled : current.enabled,
+      hours: Number(req.body?.hours || current.hours),
+      type: clean(req.body?.type, current.type).slice(0, 50)
+    };
 
-  const shouldInitiate = Boolean(settings.enabled && elapsedHours >= settings.hours);
+    await saveSupabaseInitiative(userId, next);
 
-  return res.json({
-    ok: true,
-    shouldInitiate,
-    elapsedHours: Number.isFinite(elapsedHours) ? Number(elapsedHours.toFixed(2)) : null,
-    settings
-  });
+    return res.json({ ok: true, settings: next });
+  } catch (error) {
+    console.error("POST /api/initiative:", error);
+    return res.status(500).json({ error: "No se pudo guardar la configuración." });
+  }
+});
+
+app.post("/api/initiative/check", async (req, res) => {
+  try {
+    const userId = clean(req.body?.userId, "anonymous").slice(0, 120);
+    const settings = await getSupabaseInitiative(userId);
+    const lastUserMessage = await getLatestUserMessage(userId);
+
+    const elapsedHours = lastUserMessage
+      ? (Date.now() - Date.parse(lastUserMessage.createdAt)) / 3600000
+      : Infinity;
+
+    const shouldInitiate = Boolean(settings.enabled && elapsedHours >= settings.hours);
+
+    return res.json({
+      ok: true,
+      shouldInitiate,
+      elapsedHours: Number.isFinite(elapsedHours) ? Number(elapsedHours.toFixed(2)) : null,
+      settings
+    });
+  } catch (error) {
+    console.error("POST /api/initiative/check:", error);
+    return res.status(500).json({ error: "No se pudo comprobar la iniciativa." });
+  }
 });
 
 // Mercado Pago is optional. Add MP_ACCESS_TOKEN later if you want real payments.
@@ -502,15 +494,14 @@ app.post("/api/webhook", (req, res) => {
   return res.sendStatus(200);
 });
 
-app.post("/api/admin/grant-pro", (req, res) => {
+app.post("/api/admin/grant-pro", async (req, res) => {
   const token = clean(req.headers["x-admin-token"]);
   if (!process.env.ADMIN_TOKEN || token !== process.env.ADMIN_TOKEN) return res.status(401).json({ error: "No autorizado." });
   const userId = clean(req.body?.userId).slice(0, 120);
   if (!userId) return res.status(400).json({ error: "Falta userId." });
   const days = Math.max(1, Number(req.body?.days || 30));
   const until = new Date(Date.now() + days * 86400000).toISOString();
-  db.users[userId] = { ...(db.users[userId] || {}), pro: false, proUntil: until };
-  saveDb();
+  await supabase.from("users").upsert({ user_id: userId, pro: false, pro_until: until }, { onConflict: "user_id" });
   return res.json({ ok: true, userId, pro: true, proUntil: until });
 });
 
