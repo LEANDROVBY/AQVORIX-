@@ -1,6 +1,6 @@
-# VYBE SERVER 1.0
+# AQVORIX SERVER 1.0
 
-Servidor independiente para VYBE.
+Servidor independiente para AQVORIX.
 
 ## Incluye
 

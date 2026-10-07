@@ -1,4 +1,4 @@
-# VYBE SERVER 1.1
+# AQVORIX SERVER 1.1
 
 Servidor de VYBE preparado para un modelo Free + PRO.
 
