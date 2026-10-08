@@ -13,6 +13,7 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 console.log("ENV CHECK:", { SUPABASE_URL: !!process.env.SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY: !!process.env.SUPABASE_SERVICE_ROLE_KEY });
+process.on("unhandledRejection", (reason) => { console.error("UNHANDLED REJECTION:", reason); });
 const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || "0.0.0.0";
 const PUBLIC_URL = process.env.PUBLIC_URL || `http://localhost:${PORT}`;
