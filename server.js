@@ -12,7 +12,12 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-console.log("ENV CHECK:", { SUPABASE_URL: !!process.env.SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY: !!process.env.SUPABASE_SERVICE_ROLE_KEY });
+console.log("ENV CHECK:", {
+  SUPABASE_URL: !!process.env.SUPABASE_URL,
+  SUPABASE_SERVICE_ROLE_KEY: !!process.env.SUPABASE_SERVICE_ROLE_KEY,
+  SUPABASE_URL_VALID: /^https:\/\/[^\s/]+\.supabase\.co\/?$/.test(process.env.SUPABASE_URL || ""),
+  SERVICE_KEY_LENGTH: (process.env.SUPABASE_SERVICE_ROLE_KEY || "").length
+});
 process.on("unhandledRejection", (reason) => { console.error("UNHANDLED REJECTION:", reason); });
 const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || "0.0.0.0";
