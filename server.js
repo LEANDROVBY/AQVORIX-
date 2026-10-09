@@ -1,6 +1,7 @@
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
+import OpenAI from "openai";
 import crypto from "crypto";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -26,6 +27,42 @@ const PRO_PRICE = Number(process.env.PRO_PRICE || 5000);
 
 function clean(value, fallback = "") {
   return String(value ?? fallback).trim().slice(0, 4000);
+}
+
+
+async function generateAIReply(message, context = "") {
+  if (!process.env.OPENAI_API_KEY) {
+    throw new Error("Falta configurar OPENAI_API_KEY en el servidor.");
+  }
+
+  const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+  const completion = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    messages: [
+      {
+        role: "system",
+        content: [
+          "Sos AQVORIX, un compañero de conversación cercano, natural y auténtico.",
+          "Hablá en español rioplatense, con voseo y un tono humano, cálido y espontáneo.",
+          "Respondé directamente a lo que la persona dice; evitá frases prefabricadas, elogios automáticos y preguntas innecesarias.",
+          "No repitas siempre la misma estructura. Adaptá la extensión y el tono al mensaje.",
+          "Usá el contexto previo para mantener la continuidad, sin inventar recuerdos ni afirmar que sos una persona real.",
+          "Si no sabés algo, reconocelo con honestidad."
+        ].join(" ")
+      },
+      ...(context
+        ? [{ role: "system", content: "Contexto reciente de la conversación:\n" + context }]
+        : []),
+      { role: "user", content: message }
+    ],
+    temperature: 0.8,
+    max_tokens: 600
+  });
+
+  const reply = completion.choices?.[0]?.message?.content?.trim();
+  if (!reply) throw new Error("El modelo devolvió una respuesta vacía.");
+  return reply;
 }
 
 function assistantReply(message, context = "") {
@@ -332,7 +369,8 @@ app.post("/api/chat", async (req, res) => {
       createdAt: now
     };
 
-    const context = await buildConversationContext(userId, 12); const reply = assistantReply(message, context);
+    const context = await buildConversationContext(userId, 12);
+    const reply = await generateAIReply(message, context);
 
     const assistantMessage = {
       id: crypto.randomUUID(),
