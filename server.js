@@ -31,14 +31,14 @@ function clean(value, fallback = "") {
 
 
 async function generateAIReply(message, context = "") {
-  if (!process.env.OPENAI_API_KEY) {
-    throw new Error("Falta configurar OPENAI_API_KEY en el servidor.");
+  if (!process.env.GROQ_API_KEY) {
+    throw new Error("Falta configurar GROQ_API_KEY en el servidor.");
   }
 
-  const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  const openai = new OpenAI({ apiKey: process.env.GROQ_API_KEY, baseURL: "https://api.groq.com/openai/v1" });
 
   const completion = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
+    model: "llama-3.3-70b-versatile",
     messages: [
       {
         role: "system",
